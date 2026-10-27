@@ -1,0 +1,13 @@
+
+services:
+  - type: web
+    name: ticket-triage-api
+    runtime: python
+    buildCommand: pip install -r requirements.txt
+    startCommand: uvicorn app.main:app --host 0.0.0.0 --port $PORT
+    healthCheckPath: /docs
+    envVars:
+      - key: TICKETS_DATA_PATH
+        value: data/tickets_sample.csv
+      - key: GROQ_API_KEY
+        sync: false
