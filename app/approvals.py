@@ -10,12 +10,13 @@ OPEN_STATUSES = {"pending", "info_requested"}
 REQUESTS = {}
 
 
-def create_request(ticket_id, priority, refund_amount=None, team_account_closing=False):
+def create_request(ticket_id, priority, refund_amount=None, team_account_closing=False, ticket=None):
     reasons = escalation_reasons(priority, refund_amount, team_account_closing)
     request_id = f"REQ-{len(REQUESTS) + 1}"
     request = {
         "request_id": request_id,
         "ticket_id": ticket_id,
+        "ticket": ticket,
         "refund_amount": refund_amount,
         "team_account_closing": team_account_closing,
         "escalated": bool(reasons),

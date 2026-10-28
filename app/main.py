@@ -152,6 +152,7 @@ def create_approval_request(body: ApprovalRequestCreate):
         ticket["priority"],
         body.refund_amount,
         body.team_account_closing,
+        ticket=public(ticket),
     )
 
 

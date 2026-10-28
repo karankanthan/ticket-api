@@ -65,3 +65,9 @@ def test_unknown_action_fails():
 def test_unknown_request_fails():
     with pytest.raises(LookupError):
         apply_action("REQ-999", "approve")
+
+
+def test_request_saves_ticket_details():
+    ticket = {"ticket_id": "TCK-1001", "category": "Billing", "priority": "urgent"}
+    request = create_request("TCK-1001", "urgent", ticket=ticket)
+    assert request["ticket"] == ticket
