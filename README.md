@@ -191,6 +191,8 @@ These rules need confirmation from Mara.
 
 ### Approval Rules
 
+Each request copies the ticket's details (category, priority, status, created and resolved dates) from the ticket data, so they don't need to be entered by hand.
+
 New requests start with `pending` status. The `need_more_info` action requires a note and allows the manager to approve or reject the request later. Once a request is approved or rejected, its decision cannot be changed.
 
 ### Limitations
