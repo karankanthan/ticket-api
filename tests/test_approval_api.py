@@ -60,3 +60,33 @@ def test_list_shows_created_requests():
     create({"ticket_id": "TCK-1001"})
     create({"ticket_id": "TCK-1003"})
     assert len(client.get("/approval-requests").json()) == 2
+
+
+def test_request_includes_ticket_details():
+    body = create({"ticket_id": "TCK-1001"}).json()
+    assert body["ticket"] == {
+        "ticket_id": "TCK-1001",
+        "created_at": "2026-03-02 08:23",
+        "resolved_at": "2026-03-02 17:23",
+        "category": "Billing",
+        "priority": "urgent",
+        "status": "closed",
+    }
+
+
+def test_ticket_status_does_not_replace_request_status():
+    body = create({"ticket_id": "TCK-1001"}).json()
+    assert body["status"] == "pending"
+    assert body["ticket"]["status"] == "closed"
+
+
+def test_open_ticket_has_empty_resolved_date():
+    body = create({"ticket_id": "TCK-1005"}).json()
+    assert body["ticket"]["status"] == "open"
+    assert body["ticket"]["resolved_at"] == ""
+
+
+def test_saved_request_keeps_ticket_details():
+    request_id = create({"ticket_id": "TCK-1001"}).json()["request_id"]
+    body = client.get(f"/approval-requests/{request_id}").json()
+    assert body["ticket"]["category"] == "Billing"
