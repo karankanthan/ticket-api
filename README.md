@@ -147,3 +147,52 @@ The free hosting instance may take additional time to respond after a period of 
 The `kb/` directory contains the help articles used for ticket triage. The retrieval component selects relevant articles, vand the AI service uses those articles as context when generating a suggested reply.
 
 Suggested replies should be reviewed by a human before being sent to customers.
+
+
+## Task 5: Billing Approval and Escalation Prototype
+
+This prototype creates approval requests for support tickets, identifies escalations, and allows managers to approve, reject, or request more information.
+
+### Escalation Rules
+
+A request is escalated if any one of these conditions is met:
+
+- The ticket priority is `urgent`.
+- The refund amount is more than $200.
+- A team account is closing.
+
+These rules need confirmation from Mara.
+
+### API Endpoints
+
+- `POST /approval-requests` — Create an approval request.
+- `GET /approval-requests` — List all approval requests.
+- `GET /approval-requests/{request_id}` — Get one approval request.
+- `POST /approval-requests/{request_id}/actions` — Approve, reject, or request more information.
+
+### Example Request
+
+```json
+{
+  "ticket_id": "TCK-1003",
+  "refund_amount": 250,
+  "team_account_closing": false
+}
+```
+
+### Example Action
+
+```json
+{
+  "action": "need_more_info",
+  "note": "Add invoice number"
+}
+```
+
+### Approval Rules
+
+New requests start with `pending` status. The `need_more_info` action requires a note and allows the manager to approve or reject the request later. Once a request is approved or rejected, its decision cannot be changed.
+
+### Limitations
+
+Approval requests are stored in memory, so they are lost when the application restarts. Email and help desk integrations are not included. The escalation rules and approval workflow still need confirmation from Mara.
