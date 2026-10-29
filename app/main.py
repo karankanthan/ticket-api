@@ -44,6 +44,7 @@ def load_tickets(path):
     tickets = []
     with open(path, newline="", encoding="utf-8") as f:
         for row in csv.DictReader(f):
+            row.setdefault("resolved_at", "")
             row["created"] = datetime.strptime(row["created_at"], FMT)
             row["resolved"] = (
                 datetime.strptime(row["resolved_at"], FMT)
@@ -117,13 +118,18 @@ def get_ticket(ticket_id: str):
 
 @app.get("/summary")
 def summary():
-    by_category = summarize_tickets(DATA_PATH)
+    try:
+        by_category = summarize_tickets(DATA_PATH)
+    except ValueError as error:
+        raise HTTPException(
+            status_code=503,
+            detail=f"Summary is not available for this data file. {error}",
+        )
 
     return {
         "total": len(TICKETS),
         "by_category": by_category,
     }
-
 
 
 @app.post("/triage")
