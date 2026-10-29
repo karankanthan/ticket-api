@@ -22,6 +22,11 @@ def test_first_page_has_ten_tickets():
     assert len(body) == 10
     assert body[0]["ticket_id"] == "TCK-1001"
 
+def test_health_check():
+    response = client.get("/health")
+    assert response.status_code == 200
+    assert response.json() == {"status": "ok"}
+    
 def test_unknown_ticket_is_404():
     assert client.get("/tickets/TCK-0000").status_code == 404
 

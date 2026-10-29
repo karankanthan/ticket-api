@@ -83,6 +83,9 @@ def find_ticket(ticket_id):
             return ticket
     return None
 
+@app.get("/health")
+def health():
+    return {"status": "ok"}
 
 @app.get("/tickets")
 def list_tickets(
