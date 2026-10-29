@@ -1,4 +1,4 @@
-
+import os
 from unittest.mock import patch
 
 from fastapi.testclient import TestClient
@@ -74,7 +74,10 @@ def test_triage_handles_ai_failure():
 
     
 def test_unsupported_question_uses_human_follow_up():
-    with patch("app.main.retrieve_articles", return_value=[]):
+    with (
+        patch("app.main.retrieve_articles", return_value=[]),
+        patch.dict(os.environ, {"GROQ_API_KEY": "test-key"}),
+    ):
         response = client.post(
             "/triage",
             json={
@@ -126,4 +129,3 @@ def test_prompt_injection_is_treated_as_ticket_text():
     assert response.status_code == 200
     assert response.json() == mock_result
     mock_ai.assert_called_once()
-
