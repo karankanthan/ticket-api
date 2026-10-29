@@ -53,7 +53,7 @@ class TriageRequest(BaseModel):
 
 
 class ApprovalRequestCreate(BaseModel):
-    ticket_id: str
+    ticket_id: str = Field(min_length=1, max_length=50)
     refund_amount: Optional[float] = Field(None, ge=0)
     team_account_closing: bool = False
 

@@ -33,10 +33,10 @@ def apply_action(request_id, action, note=None):
     if request is None:
         raise LookupError("request not found")
     if action not in ACTIONS:
-        raise ValueError("unknown action")
+         raise ValueError(f"unknown action, use one of: {', '.join(ACTIONS)}")
     if request["status"] not in OPEN_STATUSES:
         raise ValueError("request is already decided")
-    if action == "need_more_info" and not note:
+    if action == "need_more_info" and not (note and note.strip()):
         raise ValueError("a note is required when asking for more info")
 
     request["status"] = ACTIONS[action]
