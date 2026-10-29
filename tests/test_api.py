@@ -1,6 +1,7 @@
+import pytest
 from fastapi.testclient import TestClient
 
-from app.main import app
+from app.main import app, load_tickets
 
 client = TestClient(app)
 
@@ -26,7 +27,10 @@ def test_health_check():
     response = client.get("/health")
     assert response.status_code == 200
     assert response.json() == {"status": "ok"}
-    
+
 def test_unknown_ticket_is_404():
     assert client.get("/tickets/TCK-0000").status_code == 404
 
+def test_missing_data_file_gives_clear_error():
+    with pytest.raises(RuntimeError, match="Ticket data file not found"):
+        load_tickets("does/not/exist.csv")
