@@ -90,3 +90,18 @@ def test_saved_request_keeps_ticket_details():
     request_id = create({"ticket_id": "TCK-1001"}).json()["request_id"]
     body = client.get(f"/approval-requests/{request_id}").json()
     assert body["ticket"]["category"] == "Billing"
+
+def test_blank_note_is_400():
+    request_id = create({"ticket_id": "TCK-1003"}).json()["request_id"]
+    assert act(request_id, {"action": "need_more_info", "note": "   "}).status_code == 400
+
+
+def test_empty_ticket_id_is_422():
+    assert create({"ticket_id": ""}).status_code == 422
+
+
+def test_unknown_action_lists_valid_actions():
+    request_id = create({"ticket_id": "TCK-1003"}).json()["request_id"]
+    response = act(request_id, {"action": "delete"})
+    assert response.status_code == 400
+    assert "approve, reject, need_more_info" in response.json()["detail"]

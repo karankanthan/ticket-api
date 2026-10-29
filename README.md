@@ -1,43 +1,75 @@
 # ticket-api
 
-A small service that serves support ticket data and a per-category summary, plus a simple web page.
+A small FastAPI service for support tickets: ticket lookup, a per-category summary, AI ticket triage (Task 4), and a billing approval and escalation prototype (Task 5).
 
-Requires Python 3.8 or newer.
+## Requirements
 
-## Setup
+- Python 3.10 or newer
+- Git
 
-Install the dependencies:
+## Run from scratch
 
-```powershell
-python -m pip install -r requirements.txt
+### 1. Get the code
+
+```bash
+git clone https://github.com/karankanthan/ticket-api.git
+cd ticket-api
 ```
 
-## Run
+### 2. Create and activate a virtual environment
 
-From the project root directory, configure the sample CSV path and start the API:
+**Windows (PowerShell):**
 
 ```powershell
-$env:TICKETS_DATA_PATH = "data/tickets_sample.csv"
+python -m venv .venv
+.venv\Scripts\Activate.ps1
+```
+
+If PowerShell blocks the activation script, run:
+
+```powershell
+Set-ExecutionPolicy -Scope Process Bypass
+```
+
+Then try activating the environment again.
+
+**macOS or Linux:**
+
+```bash
+python3 -m venv .venv
+source .venv/bin/activate
+```
+
+### 3. Install dependencies
+
+```bash
+python -m pip install -r requirements-dev.txt
+```
+
+### 4. Start the API
+
+```bash
 python -m uvicorn app.main:app --reload
 ```
 
-Then open:
+### 5. Check that it works
 
+- Health check: http://localhost:8000/health — should return `{"status": "ok"}`
 - API documentation: http://localhost:8000/docs
 - Web page: http://localhost:8000/
-- Ticket summary: http://localhost:8000/summary
 
-The summary includes the total number of tickets and, for each category, its ticket count and average resolution time. Tickets without a valid resolution duration are excluded from that category's average.
+The app reads `data/tickets_sample.csv` by default. To use a different file, set `TICKETS_DATA_PATH` before starting the app.
+
+Only `POST /triage` needs a Groq API key (see Task 4 below). Other features work without it.
 
 ## Test
 
-Run the tests from the project root directory:
-
-```powershell
+```bash
 python -m pytest -q
 ```
 
-The tests cover ticket pagination, ticket lookup, and summary output.
+The tests do not need a Groq API key or an internet connection.
+
 
 
 ## Task 4: AI-Powered Ticket Triage

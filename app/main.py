@@ -14,9 +14,13 @@ from .retrieval import retrieve_articles
 from .ai_service import generate_triage
 from .approvals import REQUESTS, apply_action, create_request
 
-DATA_PATH = os.environ["TICKETS_DATA_PATH"]
 FMT = "%Y-%m-%d %H:%M"
-WEB_DIR = Path(__file__).resolve().parent.parent / "web"
+PROJECT_DIR = Path(__file__).resolve().parent.parent
+WEB_DIR = PROJECT_DIR / "web"
+DATA_PATH = os.environ.get(
+    "TICKETS_DATA_PATH",
+    str(PROJECT_DIR / "data" / "tickets_sample.csv"),
+)
 
 app = FastAPI(title="ticket-api")
 app.add_middleware(
@@ -31,9 +35,16 @@ app.add_middleware(
 )
 
 def load_tickets(path):
+    if not Path(path).is_file():
+        raise RuntimeError(
+            f"Ticket data file not found: {path}. "
+            "Set TICKETS_DATA_PATH to the CSV file, for example data/tickets_sample.csv."
+        )
+
     tickets = []
     with open(path, newline="", encoding="utf-8") as f:
         for row in csv.DictReader(f):
+            row.setdefault("resolved_at", "")
             row["created"] = datetime.strptime(row["created_at"], FMT)
             row["resolved"] = (
                 datetime.strptime(row["resolved_at"], FMT)
@@ -53,7 +64,7 @@ class TriageRequest(BaseModel):
 
 
 class ApprovalRequestCreate(BaseModel):
-    ticket_id: str
+    ticket_id: str = Field(min_length=1, max_length=50)
     refund_amount: Optional[float] = Field(None, ge=0)
     team_account_closing: bool = False
 
@@ -83,6 +94,9 @@ def find_ticket(ticket_id):
             return ticket
     return None
 
+@app.get("/health")
+def health():
+    return {"status": "ok"}
 
 @app.get("/tickets")
 def list_tickets(
@@ -104,13 +118,18 @@ def get_ticket(ticket_id: str):
 
 @app.get("/summary")
 def summary():
-    by_category = summarize_tickets(DATA_PATH)
+    try:
+        by_category = summarize_tickets(DATA_PATH)
+    except ValueError as error:
+        raise HTTPException(
+            status_code=503,
+            detail=f"Summary is not available for this data file. {error}",
+        )
 
     return {
         "total": len(TICKETS),
         "by_category": by_category,
     }
-
 
 
 @app.post("/triage")
