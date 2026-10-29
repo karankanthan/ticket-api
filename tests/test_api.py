@@ -7,8 +7,14 @@ client = TestClient(app)
 
 def test_summary_has_categories():
     body = client.get("/summary").json()
-    assert body["total"] > 0
+
+    assert body["total"] == 60
     assert "Billing" in body["by_category"]
+
+    billing = body["by_category"]["Billing"]
+    assert billing["ticket_count"] == 9
+    assert billing["average_resolution_hours"] == 37.9
+
 
 
 def test_first_page_has_ten_tickets():
@@ -19,14 +25,3 @@ def test_first_page_has_ten_tickets():
 def test_unknown_ticket_is_404():
     assert client.get("/tickets/TCK-0000").status_code == 404
 
-
-def test_summary_has_categories():
-    body = client.get("/summary").json()
-
-    assert body["total"] > 0
-    assert "Billing" in body["by_category"]
-
-    billing = body["by_category"]["Billing"]
-    assert "ticket_count" in billing
-    assert "average_resolution_hours" in billing
-    assert billing["ticket_count"] > 0
