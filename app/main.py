@@ -1,5 +1,4 @@
 import csv
-import os
 from datetime import datetime
 from pathlib import Path
 from typing import Optional
@@ -13,14 +12,11 @@ from .ticket_summary import summarize_tickets
 from .retrieval import retrieve_articles
 from .ai_service import generate_triage
 from .approvals import REQUESTS, apply_action, create_request
+from .config import PROJECT_DIR, settings
 
 FMT = "%Y-%m-%d %H:%M"
-PROJECT_DIR = Path(__file__).resolve().parent.parent
 WEB_DIR = PROJECT_DIR / "web"
-DATA_PATH = os.environ.get(
-    "TICKETS_DATA_PATH",
-    str(PROJECT_DIR / "data" / "tickets_sample.csv"),
-)
+DATA_PATH = settings.tickets_data_path
 
 app = FastAPI(title="ticket-api")
 app.add_middleware(
