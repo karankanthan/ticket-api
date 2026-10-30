@@ -32,11 +32,14 @@ def test_ids_are_not_reused_after_restart():
 
 
 def test_history_records_each_step(monkeypatch):
-    times = iter(["2026-10-30T09:00:00+05:30", "2026-10-30T10:00:00+05:30", "2026-10-30T11:00:00+05:30"])
-    monkeypatch.setattr(clock, "timestamp", lambda: next(times))
+    current = {"time": ""}
+    monkeypatch.setattr(clock, "timestamp", lambda: current["time"])
 
+    current["time"] = "2026-10-30T09:00:00+05:30"
     request = create_request("TCK-1001", "normal")
+    current["time"] = "2026-10-30T10:00:00+05:30"
     apply_action(request["request_id"], "need_more_info", "Add invoice number", via="email")
+    current["time"] = "2026-10-30T11:00:00+05:30"
     result = apply_action(request["request_id"], "approve", via="email")
 
     assert [(h["event"], h["status"], h["via"]) for h in result["history"]] == [

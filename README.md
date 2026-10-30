@@ -229,4 +229,93 @@ New requests start with `pending` status. The `need_more_info` action requires a
 
 ### Limitations
 
-Approval requests are stored in memory, so they are lost when the application restarts. Email and help desk integrations are not included. The escalation rules and approval workflow still need confirmation from Mara.
+Approval requests are now saved to `data/store/` and survive restarts (see the Approval Control Center below). Help desk integrations are not included. The escalation rules and approval workflow still need confirmation from Mara.
+
+These endpoints are unchanged and are not protected by `ADMIN_API_KEY`, so anyone who can reach the API can record a decision through them. Keep this in mind before deploying.
+
+## Approval Control Center (backend)
+
+The Helpdesk Head reviews tickets that need manager approval, picks some (Top 5, 10, 20, a custom number, or individual tickets), and sends the manager **one email per batch**. The email has separate Approve, Reject and Request more information links for each ticket. The manager does not sign in.
+
+### How it works
+
+1. **Detection.** When the app starts, or when `POST /api/control-center/import` re-reads the CSV, unresolved tickets (`open`, `in_progress`) are checked against the escalation rules:
+   - priority `urgent`
+   - `refund_amount` over $200, when the column is present
+   - a `team_account_closing` column set to `yes`/`true`/`1`. A `team-account` label alone does **not** count.
+
+   Matching tickets go into the **queue** as recommendations. Nothing is emailed and no approval request is created yet. Tickets that already have a request, or that were dismissed, are not recommended again.
+2. **Manual requests.** Any ticket, even a resolved one, can be added with `POST /api/control-center/queue`.
+3. **Ranking.** Urgent first, then SLA breached, then least time left before breach, then oldest, then larger refund.
+4. **Preview, then submit.** `POST /api/control-center/preview` returns the selection. `POST /api/control-center/batches` with those `item_ids` creates the approval requests and sends one email. A ticket with an open request cannot be sent again.
+5. **Manager decision.** Each link opens a confirmation page, and **opening a link changes nothing**, because email scanners open links automatically. The decision is saved only when the manager presses Confirm. Links are single-use and expire (72 h by default). Once one is used, the other links for that ticket stop working. Only SHA-256 hashes of the links are stored.
+6. **More information.** If the manager asks for more information, answer with `POST /api/approvals/{id}/provide-info`. The ticket goes back into the queue to be sent again.
+7. **Automation**, every 5 minutes by default:
+   - Reminders at 2, 6 and 24 hours, at most 3 per request. Each reminder is one email per batch, with fresh links that replace the old ones.
+   - Overdue manager responses (4 h for urgent, 24 h otherwise) and newly breached ticket SLAs are recorded in the activity history.
+
+   Nothing is ever approved or rejected automatically.
+
+Ticket SLA targets are 4 / 8 / 24 / 72 hours (urgent / high / normal / low). They are measured from `created_at` and only when the needed dates exist. A resolved ticket without `resolved_at` shows SLA as `unknown`; no dates are guessed. CSV times are read as this computer's local time.
+
+All timings are configurable; see `.env.example`.
+
+### New endpoints
+
+All `/api/...` routes need the `X-Admin-Key` header when `ADMIN_API_KEY` is set.
+
+| Method | Path | Purpose |
+|---|---|---|
+| GET | `/api/health` | Detailed health: tickets loaded, storage writable, email and scheduler status |
+| GET | `/api/dashboard` | Ticket, SLA, approval, queue, batch and email statistics |
+| GET | `/api/control-center/queue?priority=urgent,high` | Ranked recommendation queue |
+| POST | `/api/control-center/queue` | Add any ticket manually |
+| POST | `/api/control-center/queue/{item_id}/dismiss` | Remove a recommendation |
+| POST | `/api/control-center/preview` | Preview Top N (`mode: top`, `count`, `priorities`) or a manual selection (`mode: manual`, `item_ids`) |
+| POST | `/api/control-center/batches` | Submit the reviewed `item_ids` and email the manager |
+| GET | `/api/control-center/batches` | Batch history |
+| GET | `/api/control-center/batches/{batch_id}` | One batch with its requests and email attempts |
+| POST | `/api/control-center/batches/{batch_id}/resend` | Send fresh links for the batch's pending requests (after a failed email or expired links) |
+| POST | `/api/control-center/import` | Re-read the ticket CSV and analyse it |
+| GET | `/api/approvals?status=&batch_id=&ticket_id=` | Approval history |
+| GET | `/api/approvals/{request_id}` | One request with its full history |
+| POST | `/api/approvals/{request_id}/provide-info` | Answer the manager's request for more information |
+| GET | `/api/activity?limit=&event=` | Activity history |
+| GET | `/api/email/status` | Email configuration (manager address masked, no passwords) |
+| POST | `/api/email/test` | Send a test email (`{"confirm": true}`) |
+| GET | `/api/automation/status` | Scheduler status and reminders due |
+| POST | `/api/automation/run` | Run the reminder and SLA checks now |
+| GET | `/api/tickets/{ticket_id}/sla` | SLA for one ticket |
+| GET / POST | `/act/{token}` | Manager confirmation page (GET) and decision (POST). No admin key. |
+
+### Try the manager workflow locally
+
+With the default `EMAIL_BACKEND=file`, nothing is emailed. Each message is saved as an `.eml` file in `data/outbox/`.
+
+1. Start the API: `python -m uvicorn app.main:app --reload`
+2. Open http://localhost:8000/docs.
+3. Run `POST /api/control-center/preview` with `{"mode": "top", "count": 5}` and copy `item_ids` from the response.
+4. Run `POST /api/control-center/batches` with `{"item_ids": [...]}`. The response says `"status": "saved_to_outbox"` and `"delivered": false`.
+5. Open the newest file in `data/outbox/` (double-click opens it in Outlook or Mail, or open it in a text editor). Open an Approve, Reject or Request more information link in your browser and press Confirm.
+6. Check `GET /api/approvals` and `GET /api/dashboard`: the decision shows straight away.
+
+Because the sample CSV dates are from March 2026, every open sample ticket already shows as SLA breached.
+
+### Real email (SMTP)
+
+Set these in `.env`, then restart:
+
+- `EMAIL_BACKEND=smtp`
+- `SMTP_HOST`, `SMTP_PORT`, `SMTP_SECURITY`
+- `SMTP_USERNAME`, `SMTP_PASSWORD`
+- `EMAIL_FROM`, `MANAGER_EMAIL`
+
+Then run `POST /api/email/test` with `{"confirm": true}`. Delivery is reported as `sent` only when the SMTP server accepted the message. Gmail and Microsoft 365 usually need an app password.
+
+### Security and limitations
+
+- **The admin key is a single shared key, not employee sign-in.** It is optional locally and required when `APP_ENV=production`. Anyone with the key has full Helpdesk Head access, and the history cannot show which person acted. Never put the key in frontend code or Git.
+- **Anyone holding the email can act on it.** The manager's links work for anyone who has them. Decisions are recorded as "via email", not as a verified person.
+- **Links to `localhost` only work on this computer.** Until the app is deployed, or reachable through a tunnel with `PUBLIC_BASE_URL` set, the manager cannot use links from another device.
+- **One server process only.** Data is stored in JSON files with safe writes, and one server process must own them: no `--workers`, no second copy of the app.
+- **Replies are not read.** Replies to the email are ignored; only the links record decisions.

@@ -85,6 +85,10 @@ class PersistentDict(dict):
             self.counter += 1
             return f"{prefix}-{self.counter}"
 
+    def put(self, key, value):
+        """Set a value without saving, for several changes followed by one save()."""
+        super().__setitem__(key, value)
+
     def __setitem__(self, key, value):
         with self.lock:
             super().__setitem__(key, value)

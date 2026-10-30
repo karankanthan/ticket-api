@@ -1,4 +1,7 @@
+import asyncio
 import csv
+import logging
+from contextlib import asynccontextmanager
 from datetime import datetime
 from pathlib import Path
 from typing import Optional
@@ -13,12 +16,29 @@ from .retrieval import retrieve_articles
 from .ai_service import generate_triage
 from .approvals import REQUESTS, apply_action, create_request
 from .config import PROJECT_DIR, settings
+from . import activity, automation, email_service, recommendations
+from .admin_api import create_router
+from .manager_actions import router as manager_router
 
 FMT = "%Y-%m-%d %H:%M"
 WEB_DIR = PROJECT_DIR / "web"
 DATA_PATH = settings.tickets_data_path
 
-app = FastAPI(title="ticket-api")
+log = logging.getLogger("ticket_api")
+
+
+@asynccontextmanager
+async def lifespan(app):
+    recommendations.analyse_tickets(TICKETS)
+    task = None
+    if settings.scheduler_enabled:
+        task = asyncio.create_task(automation.scheduler_loop(lambda: TICKETS))
+    yield
+    if task:
+        task.cancel()
+
+
+app = FastAPI(title="ticket-api", lifespan=lifespan)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=[
@@ -52,6 +72,14 @@ def load_tickets(path):
 
 
 TICKETS = load_tickets(DATA_PATH)
+
+
+def reload_tickets():
+    """Re-read the ticket CSV. On any error the current tickets stay in place."""
+    new_tickets = load_tickets(DATA_PATH)
+    TICKETS[:] = new_tickets
+    activity.record("tickets_imported", f"Imported {len(new_tickets)} tickets from the CSV file", count=len(new_tickets))
+    return len(new_tickets)
 
 
 class TriageRequest(BaseModel):
@@ -192,5 +220,34 @@ def act_on_approval_request(request_id: str, body: ApprovalAction):
     except ValueError as error:
         raise HTTPException(status_code=400, detail=str(error))
 
+
+@app.get("/api/health")
+def detailed_health():
+    email = email_service.status()
+    return {
+        "status": "ok",
+        "tickets_loaded": len(TICKETS),
+        "store_dir_writable": _store_writable(),
+        "email_backend": email["backend"],
+        "email_ready": email["ready"],
+        "scheduler_enabled": settings.scheduler_enabled,
+        "scheduler_last_run_at": automation.STATE["last_run_at"],
+    }
+
+
+def _store_writable():
+    try:
+        settings.store_dir.mkdir(parents=True, exist_ok=True)
+        probe = settings.store_dir / ".write-check"
+        probe.write_text("ok", encoding="utf-8")
+        probe.unlink()
+        return True
+    except OSError:
+        return False
+
+
+# New routes must be registered before the static mount, which catches every other path.
+app.include_router(manager_router)
+app.include_router(create_router(lambda: TICKETS, reload_tickets))
 
 app.mount("/", StaticFiles(directory=WEB_DIR, html=True), name="web")
