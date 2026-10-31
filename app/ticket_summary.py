@@ -34,6 +34,11 @@ def summarize_tickets(csv_path):
 
             if not created or not resolved:
                 continue
+            # Only genuinely finished tickets count towards resolution time; a resolved date
+            # left on an open ticket must not distort the average.
+            status = (row.get("status") or "").strip().lower()
+            if status and status not in ("resolved", "closed"):
+                continue
 
             try:
                 start = parse_date(created)

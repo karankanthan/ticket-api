@@ -1,75 +1,41 @@
-# React + TypeScript + Vite
+# TicketFlow web app
 
-This template provides a minimal setup to get React working in Vite with HMR and some ESLint rules.
+React + TypeScript + Vite + Tailwind CSS front end for the ticket API.
 
-Currently, two official plugins are available:
+## Run locally (Windows PowerShell)
 
-- [@vitejs/plugin-react](https://github.com/vitejs/vite-plugin-react/blob/main/packages/plugin-react) uses [Oxc](https://oxc.rs)
-- [@vitejs/plugin-react-swc](https://github.com/vitejs/vite-plugin-react/blob/main/packages/plugin-react-swc) uses [SWC](https://swc.rs/)
+Start the backend first (from the project folder):
 
-## React Compiler
-
-The React Compiler is not enabled on this template because of its impact on dev & build performances. To add it, see [this documentation](https://react.dev/learn/react-compiler/installation).
-
-## Expanding the ESLint configuration
-
-If you are developing a production application, we recommend updating the configuration to enable type-aware lint rules:
-
-```js
-export default defineConfig([
-  globalIgnores(['dist']),
-  {
-    files: ['**/*.{ts,tsx}'],
-    extends: [
-      // Other configs...
-
-      // Remove tseslint.configs.recommended and replace with this
-      tseslint.configs.recommendedTypeChecked,
-      // Alternatively, use this for stricter rules
-      tseslint.configs.strictTypeChecked,
-      // Optionally, add this for stylistic rules
-      tseslint.configs.stylisticTypeChecked,
-
-      // Other configs...
-    ],
-    languageOptions: {
-      parserOptions: {
-        project: ['./tsconfig.node.json', './tsconfig.app.json'],
-        tsconfigRootDir: import.meta.dirname,
-      },
-      // other options...
-    },
-  },
-])
-
+```powershell
+.\scripts\start-backend.ps1
 ```
 
-You can also install [eslint-plugin-react-x](https://npmx.dev/package/eslint-plugin-react-x) and [eslint-plugin-react-dom](https://npmx.dev/package/eslint-plugin-react-dom) for React-specific lint rules:
+Then, in a second window:
 
-```js
-// eslint.config.js
-import reactX from 'eslint-plugin-react-x'
-import reactDom from 'eslint-plugin-react-dom'
-
-export default defineConfig([
-  globalIgnores(['dist']),
-  {
-    files: ['**/*.{ts,tsx}'],
-    extends: [
-      // Other configs...
-      // Enable lint rules for React
-      reactX.configs['recommended-typescript'],
-      // Enable lint rules for React DOM
-      reactDom.configs.recommended,
-    ],
-    languageOptions: {
-      parserOptions: {
-        project: ['./tsconfig.node.json', './tsconfig.app.json'],
-        tsconfigRootDir: import.meta.dirname,
-      },
-      // other options...
-    },
-  },
-])
-
+```powershell
+.\scripts\start-frontend.ps1
 ```
+
+Open http://localhost:5173. `.\scripts\dev.ps1` opens both windows at once.
+
+During development, Vite forwards `/api`, `/health`, `/summary` and `/approval-requests` to the backend, so the browser talks to a single origin. `/triage` is not forwarded: AI Triage is a standalone backend capability, not part of the TicketFlow app (`src/pages/TriagePage.tsx` is kept but not routed). Browser pages such as `/tickets` and `/act/<token>` are not forwarded. Change the backend address or port in `frontend/.env.local` (see `.env.example`). `VITE_API_BASE_URL` (for example the Task 4 deployment in `frontend/.env`) only applies to production builds; the dev server always uses the local backend.
+
+## Commands
+
+```powershell
+npm test         # Vitest + Testing Library
+npm run lint     # ESLint
+npm run build    # type-check and production build into dist/
+```
+
+## Structure
+
+- `src/api/`: the central HTTP client (`client.ts`), endpoint functions and response types
+- `src/hooks/useApi.ts`: data loading with polling, refresh on focus and a global refresh after changes
+- `src/components/ui/`: design-system components (buttons, cards, badges, dialogs, toasts, forms)
+- `src/pages/`: one file per page; `ManagerActionPage` is the page opened from manager email links
+- `src/test/`: tests, a fetch mock and fixtures shaped like real API responses
+
+## Admin key
+
+If the backend sets `ADMIN_API_KEY`, enter it on the Settings page. It is kept only for the current browser tab session and is never part of the built code.

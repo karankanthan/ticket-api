@@ -3,3 +3,5 @@ __pycache__/
 .env
 .pytest_cache/
 data/helpdesk_export.csv
+data/store/
+data/outbox/
