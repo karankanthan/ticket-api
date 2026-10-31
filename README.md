@@ -2,6 +2,25 @@
 
 A small FastAPI service for support tickets: ticket lookup, a per-category summary, AI ticket triage (Task 4), and a billing approval and escalation prototype (Task 5).
 
+It also includes **TicketFlow**, a React web app for the Helpdesk Head (dashboard, tickets, CSV import, Approval Control Center, history, reports and settings) and a no-login page where the manager approves, rejects or asks for more information from email links.
+
+AI Triage (Task 4) is kept as a **standalone backend capability** (`POST /triage`). It is not part of Mara's TicketFlow workflow and is not shown in the TicketFlow web app: tickets arrive from the existing helpdesk by CSV import, and triage only returns suggestions, it never creates or changes tickets.
+
+## Quick start: TicketFlow on Windows
+
+From the project folder in PowerShell:
+
+```powershell
+Set-ExecutionPolicy -Scope Process Bypass   # only if scripts are blocked
+.\scripts\dev.ps1
+```
+
+This opens two windows: the API on http://localhost:8000 and the web app on **http://localhost:5173**. To start them separately, run `.\scripts\start-backend.ps1` and `.\scripts\start-frontend.ps1` in two windows. The first run creates `.venv` and installs the npm packages (Python 3.10+ and Node.js 20+ are needed).
+
+The start script sets `PUBLIC_BASE_URL=http://localhost:5173`, so the links in manager emails open the TicketFlow decision page. Without the web app, set `PUBLIC_BASE_URL=http://localhost:8000` to use the API's built-in confirmation page instead.
+
+Frontend details are in [frontend/README.md](frontend/README.md).
+
 ## Requirements
 
 - Python 3.10 or newer
@@ -70,11 +89,27 @@ python -m pytest -q
 
 The tests do not need a Groq API key or an internet connection.
 
+Frontend tests, lint and build:
+
+```powershell
+cd frontend
+npm test
+npm run lint
+npm run build
+```
+
 
 
 ## Task 4: AI-Powered Ticket Triage
 
 This feature classifies customer support tickets, assigns a priority, and generates a suggested reply using the Groq API and the provided knowledge base.
+
+**Status:** retained as a standalone backend capability. It is not part of Mara's TicketFlow workflow, which works on tickets imported from the existing helpdesk:
+
+- `POST /triage` and its tests are unchanged, and the Render deployment below still serves it.
+- It only returns suggestions. It never creates tickets or changes the approval queue or approval records (`tests/test_triage_guard.py` checks this).
+- It is not in the TicketFlow sidebar or routes, and the TicketFlow dev server does not forward `/triage`. The page component (`frontend/src/pages/TriagePage.tsx`) and its test are kept in the source but not routed.
+- Text sent to `/triage` is passed to an external AI service (Groq), so avoid pasting customer personal data.
 
 ### Features
 
@@ -127,23 +162,11 @@ Example request:
 
 The response includes `category`, `priority`, `suggested_reply`, and `source_article_ids`.
 
-### Run the Frontend
+### Using triage
 
-Open a separate terminal:
+Triage is no longer available from the TicketFlow web app. Call the API directly instead: open http://localhost:8000/docs, choose `POST /triage` and use "Try it out", or use the deployed API below.
 
-```powershell
-cd frontend
-npm install
-npm run dev
-```
-
-Configure `frontend/.env` with the backend URL:
-
-```dotenv
-VITE_API_BASE_URL=http://127.0.0.1:8000
-```
-
-For local development, start the backend before using the frontend. For a deployed frontend, set `VITE_API_BASE_URL` to the deployed API URL and rebuild the frontend.
+To show the triage page again, route `TriagePage` in `frontend/src/App.tsx` and add `/triage` back to `PROXIED_PATHS` in `frontend/vite.config.ts`. A production build uses `VITE_API_BASE_URL` from `frontend/.env` (the Task 4 deployment); the dev server always uses the local backend.
 
 ### Frontend Tests and Production Build
 
@@ -287,6 +310,12 @@ All `/api/...` routes need the `X-Admin-Key` header when `ADMIN_API_KEY` is set.
 | POST | `/api/automation/run` | Run the reminder and SLA checks now |
 | GET | `/api/tickets/{ticket_id}/sla` | SLA for one ticket |
 | GET / POST | `/act/{token}` | Manager confirmation page (GET) and decision (POST). No admin key. |
+| GET / POST | `/api/manager/actions/{token}` | The same as JSON, used by the TicketFlow manager page. No admin key. |
+| GET | `/api/tickets`, `/api/tickets/{ticket_id}` | All tickets with SLA and approval status (no customer contact data) |
+| POST | `/api/imports/preview` | Check an uploaded CSV: detected columns, suggested mapping, row errors |
+| POST | `/api/imports` | Import a CSV with a column mapping; current tickets are kept if it fails |
+| GET | `/api/imports` | Import history and the active ticket file |
+| GET | `/api/settings` | Configuration summary without secrets |
 
 ### Try the manager workflow locally
 

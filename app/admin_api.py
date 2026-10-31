@@ -6,17 +6,18 @@ X-Admin-Key header. This is one shared key, not per-person sign-in.
 
 import hmac
 from collections import Counter
-from typing import List, Literal, Optional
+from typing import Dict, List, Literal, Optional
 
 from fastapi import APIRouter, Depends, Header, HTTPException, Query
 from pydantic import BaseModel, Field
 
-from . import activity, approvals, automation, batches, clock, config, email_service, email_templates, recommendations
+from . import activity, approvals, automation, batches, clock, config, email_service, email_templates, recommendations, ticket_imports
 from .approvals import REQUESTS
 from .batches import BATCHES
 from .config import PRIORITIES
+from .escalation import REFUND_THRESHOLD
 from .recommendations import QUEUE, QueueError
-from .serializers import request_view, ticket_brief
+from .serializers import request_view, ticket_brief, ticket_staff_view
 from .sla import UNRESOLVED, approval_response, ticket_sla
 
 
@@ -47,7 +48,9 @@ class SelectionBody(BaseModel):
 
 
 class BatchBody(BaseModel):
-    item_ids: List[str] = Field(min_length=1)
+    # Either queue items (Eligible Queue) or tickets (All Tickets), not both.
+    item_ids: Optional[List[str]] = None
+    ticket_ids: Optional[List[str]] = None
     note: Optional[str] = Field(None, max_length=1000)
     selection: Optional[SelectionBody] = None
 
@@ -58,6 +61,25 @@ class ProvideInfoBody(BaseModel):
 
 class TestEmailBody(BaseModel):
     confirm: bool = False
+
+
+class ImportPreviewBody(BaseModel):
+    filename: str = Field("upload.csv", max_length=255)
+    content: str = Field(max_length=ticket_imports.MAX_CONTENT_CHARS)
+    mapping: Optional[Dict[str, Optional[str]]] = None
+    date_format: Literal["auto", "DD/MM/YYYY", "MM/DD/YYYY"] = "auto"
+    # Explicit choices for non-standard statuses, e.g. {"Escalated": "in_progress", "Pending": "in_progress"}.
+    # A null/empty value means rows with that status are not imported.
+    status_map: Optional[Dict[str, Optional[str]]] = None
+
+
+class ImportCommitBody(ImportPreviewBody):
+    mapping: Dict[str, Optional[str]]
+    skip_invalid: bool = False
+    # Additional columns to include in manager approval emails (off unless chosen).
+    manager_fields: List[str] = Field(default_factory=list, max_length=50)
+    # Required when current tickets are missing from the new file.
+    acknowledge_removals: bool = False
 
 
 def _queue_error(error):
@@ -74,7 +96,7 @@ def _priorities(raw):
     return values
 
 
-def create_router(get_tickets, reload_tickets):
+def create_router(get_tickets, reload_tickets, use_ticket_file, current_data_path, get_load_report=lambda: {}):
     router = APIRouter(prefix="/api", dependencies=[Depends(require_admin)])
 
     def tickets_by_id():
@@ -93,8 +115,9 @@ def create_router(get_tickets, reload_tickets):
         requests = list(REQUESTS.values())
         by_status = Counter(r["status"] for r in requests)
         pending = [r for r in requests if r["status"] == "pending"]
-        queued = [i for i in QUEUE.values() if i["status"] == recommendations.OPEN_ITEM]
         lookup = tickets_by_id()
+        # Same rule as the queue itself: only items whose ticket is in the current data.
+        queued = [i for i in QUEUE.values() if i["status"] == recommendations.OPEN_ITEM and i["ticket_id"] in lookup]
         all_batches = sorted(BATCHES.values(), key=lambda b: int(b["batch_id"].split("-")[1]), reverse=True)
 
         return {
@@ -174,11 +197,16 @@ def create_router(get_tickets, reload_tickets):
 
     @router.post("/control-center/batches", status_code=201)
     def submit_batch(body: BatchBody):
+        if bool(body.item_ids) == bool(body.ticket_ids):
+            raise HTTPException(status_code=422, detail="Send either item_ids (queue) or ticket_ids (All Tickets), with at least one.")
         try:
-            batch = batches.submit(
-                body.item_ids, tickets_by_id(), body.note,
-                body.selection.model_dump() if body.selection else None,
-            )
+            if body.ticket_ids:
+                batch = batches.submit_tickets(body.ticket_ids, tickets_by_id(), body.note)
+            else:
+                batch = batches.submit(
+                    body.item_ids, tickets_by_id(), body.note,
+                    body.selection.model_dump() if body.selection else None,
+                )
         except QueueError as error:
             raise _queue_error(error)
         return batches.batch_view(batch)
@@ -228,14 +256,14 @@ def create_router(get_tickets, reload_tickets):
             items = [r for r in items if r["ticket_id"] == ticket_id]
         items.sort(key=lambda r: r.get("updated_at") or "", reverse=True)
         now = clock.now()
-        return [{**request_view(r), "response": approval_response(r, now)} for r in items]
+        return [{**request_view(r), "response": approval_response(r, now), "delivery": batches.delivery_for(r)} for r in items]
 
     @router.get("/approvals/{request_id}")
     def get_approval(request_id: str):
         request = REQUESTS.get(request_id)
         if request is None:
             raise HTTPException(status_code=404, detail="request not found")
-        return {**request_view(request), "response": approval_response(request)}
+        return {**request_view(request), "response": approval_response(request), "delivery": batches.delivery_for(request)}
 
     @router.post("/approvals/{request_id}/provide-info")
     def provide_info(request_id: str, body: ProvideInfoBody):
@@ -283,6 +311,131 @@ def create_router(get_tickets, reload_tickets):
     @router.post("/automation/run")
     def run_automation():
         return automation.run_once(get_tickets())
+
+    def approval_index():
+        latest = {}
+        for request in REQUESTS.values():
+            current = latest.get(request["ticket_id"])
+            if current is None or int(request["request_id"].split("-")[1]) > int(current["request_id"].split("-")[1]):
+                latest[request["ticket_id"]] = request
+        queued = {i["ticket_id"]: i for i in QUEUE.values() if i["status"] == recommendations.OPEN_ITEM}
+        return latest, queued
+
+    def approval_summary(ticket_id, latest, queued):
+        request = latest.get(ticket_id)
+        item = queued.get(ticket_id)
+        if request and request["status"] in approvals.OPEN_STATUSES:
+            status = request["status"]
+        elif item:
+            status = "queued"
+        elif request:
+            status = request["status"]
+        else:
+            status = "none"
+        return {
+            "status": status,
+            "request_id": request["request_id"] if request else None,
+            "batch_id": request.get("batch_id") if request else None,
+            "decided_at": request.get("decided_at") if request else None,
+            "queue_item_id": item["item_id"] if item else None,
+            "queue_reasons": item["reasons"] if item else [],
+        }
+
+    @router.get("/tickets")
+    def list_all_tickets():
+        now = clock.now()
+        latest, queued = approval_index()
+        tickets = [
+            {**ticket_staff_view(t), "sla": ticket_sla(t, now), "approval": approval_summary(t["ticket_id"], latest, queued)}
+            for t in get_tickets()
+        ]
+        return {"total": len(tickets), "generated_at": now.isoformat(timespec="seconds"), "tickets": tickets}
+
+    @router.get("/tickets/{ticket_id}")
+    def ticket_detail(ticket_id: str):
+        ticket = tickets_by_id().get(ticket_id)
+        if ticket is None:
+            raise HTTPException(status_code=404, detail="ticket not found")
+        latest, queued = approval_index()
+        requests = sorted(
+            (r for r in REQUESTS.values() if r["ticket_id"] == ticket_id),
+            key=lambda r: int(r["request_id"].split("-")[1]), reverse=True,
+        )
+        now = clock.now()
+        return {
+            **ticket_staff_view(ticket),
+            "sla": ticket_sla(ticket, now),
+            "approval": approval_summary(ticket_id, latest, queued),
+            "requests": [{**request_view(r), "response": approval_response(r, now)} for r in requests],
+        }
+
+    @router.post("/imports/preview")
+    def import_preview(body: ImportPreviewBody):
+        try:
+            return ticket_imports.preview(body.filename, body.content, body.mapping, body.date_format, body.status_map, current_tickets=get_tickets())
+        except ticket_imports.ImportFailed as error:
+            raise HTTPException(status_code=error.status_code, detail=str(error))
+
+    @router.post("/imports", status_code=201)
+    def import_commit(body: ImportCommitBody):
+        try:
+            entry = ticket_imports.commit(
+                body.filename, body.content, body.mapping, body.date_format, body.skip_invalid, use_ticket_file,
+                status_map=body.status_map, manager_fields=body.manager_fields,
+                acknowledge_removals=body.acknowledge_removals, current_tickets=list(get_tickets()),
+            )
+        except ticket_imports.ImportFailed as error:
+            detail = {"message": str(error), **(error.details or {})}
+            raise HTTPException(status_code=error.status_code, detail=detail)
+        analysis = recommendations.analyse_tickets(get_tickets())
+        ticket_imports.set_analysis(entry["import_id"], analysis)
+        return {**entry, "analysis": analysis}
+
+    @router.get("/imports")
+    def import_history():
+        return {"active_file": current_data_path(), "imports": ticket_imports.history()}
+
+    @router.get("/settings")
+    def app_settings():
+        settings = config.settings
+        return {
+            "environment": {
+                "app_env": settings.app_env,
+                "admin_key_required": settings.admin_key_required,
+                "scheduler_enabled": settings.scheduler_enabled,
+                "scheduler_interval_seconds": settings.scheduler_interval_seconds,
+                "public_base_url": settings.public_base_url,
+                "ticket_data_file": current_data_path(),
+                "tickets_loaded": len(get_tickets()),
+                "data_load": {
+                    key: get_load_report().get(key)
+                    for key in ("file", "total_rows", "loaded", "skipped")
+                } | {"reasons": (get_load_report().get("reasons") or [])[:50]},
+                "store_dir": str(settings.store_dir),
+            },
+            "sla": {
+                "ticket_sla_hours": settings.ticket_sla_hours,
+                "approval_response_hours": settings.approval_response_hours,
+                "at_risk_fraction": settings.sla_at_risk_fraction,
+            },
+            "reminders": {
+                "after_hours": list(settings.reminder_after_hours),
+                "max_reminders": settings.max_reminders,
+                "action_link_ttl_hours": settings.action_link_ttl_hours,
+            },
+            "approval_rules": [
+                {"rule": "urgent ticket", "description": "Ticket priority is urgent (P1)."},
+                {"rule": f"refund over ${REFUND_THRESHOLD}", "description": f"Refund amount is more than ${REFUND_THRESHOLD}, when refund data is available."},
+                {"rule": "team account closing", "description": "An explicit team_account_closing value is yes/true/1. A team-account label alone does not count."},
+            ],
+            "batches": {"max_batch_size": settings.max_batch_size},
+            "employee_notifications": {
+                "enabled": settings.employee_notifications,
+                "allowed_domains": list(settings.employee_email_domains),
+                "source": "The ticket's raised-by employee email column (customer columns are never used).",
+            },
+            "email": email_service.status(),
+        }
 
     @router.get("/tickets/{ticket_id}/sla")
     def ticket_sla_view(ticket_id: str):

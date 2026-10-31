@@ -114,6 +114,14 @@ def analyse_tickets(tickets):
             else:
                 _new_item(ticket_id, "auto", reasons, refund, closing)
             summary["added"] += 1
+
+        # After an import replaces the tickets, queued items for tickets that are no
+        # longer in the data cannot be sent, so take them out of the queue.
+        current = {t["ticket_id"] for t in tickets}
+        for item in QUEUE.values():
+            if item["status"] == OPEN_ITEM and item["ticket_id"] not in current:
+                item.update(status="withdrawn", status_reason="ticket is not in the current ticket data", updated_at=now)
+                summary["withdrawn"] += 1
         QUEUE.save()
 
     activity.record(
@@ -122,6 +130,13 @@ def analyse_tickets(tickets):
         **summary,
     )
     return summary
+
+
+def _manual_item(ticket, refund_amount=None, team_account_closing=False, note=None):
+    refund = refund_amount if refund_amount is not None else parse_refund(ticket)
+    closing = team_account_closing or is_team_account_closing(ticket)
+    reasons = escalation_reasons(ticket.get("priority"), refund, closing)
+    return _new_item(ticket["ticket_id"], "manual", reasons, refund, closing, note=note)
 
 
 def add_manual(ticket, refund_amount=None, team_account_closing=False, note=None):
@@ -133,10 +148,7 @@ def add_manual(ticket, refund_amount=None, team_account_closing=False, note=None
         active = active_request_for(ticket_id)
         if active:
             raise QueueError(f"{ticket_id} already has an open approval request ({active['request_id']}).")
-        refund = refund_amount if refund_amount is not None else parse_refund(ticket)
-        closing = team_account_closing or is_team_account_closing(ticket)
-        reasons = escalation_reasons(ticket.get("priority"), refund, closing)
-        item = _new_item(ticket_id, "manual", reasons, refund, closing, note=note)
+        item = _manual_item(ticket, refund_amount, team_account_closing, note)
         QUEUE.save()
     activity.record("queue_manual_add", f"{ticket_id} added to the approval queue manually", item_id=item["item_id"], ticket_id=ticket_id)
     return item
@@ -198,7 +210,10 @@ def ranked_queue(tickets_by_id, priorities=None, now=None):
         if item["status"] != OPEN_ITEM:
             continue
         ticket = tickets_by_id.get(item["ticket_id"])
-        if priorities and (ticket or {}).get("priority") not in priorities:
+        # A ticket that is not in the current data cannot be sent, so it is not eligible.
+        if ticket is None:
+            continue
+        if priorities and ticket.get("priority") not in priorities:
             continue
         views.append(item_view(item, ticket, now))
     views.sort(key=rank_key)
@@ -232,7 +247,12 @@ def select(tickets_by_id, mode, count=None, priorities=None, item_ids=None):
         for item_id in wanted:
             if item_id not in by_id:
                 item = QUEUE.get(item_id)
-                problems.append(f"{item_id} is {item['status']}" if item else f"{item_id} was not found")
+                if item is None:
+                    problems.append(f"{item_id} was not found")
+                elif item["status"] != OPEN_ITEM:
+                    problems.append(f"{item_id} is {item['status']}")
+                else:
+                    problems.append(f"{item_id} ({item['ticket_id']}) is not in the current ticket data")
         if problems:
             raise QueueError("Some selected items cannot be sent: " + "; ".join(problems) + ".")
         selected = [by_id[i] for i in wanted]

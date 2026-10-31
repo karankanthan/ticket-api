@@ -2,11 +2,11 @@
 
 import threading
 
-from . import activity, approvals, clock, config, email_service, email_templates, tokens
+from . import activity, approvals, clock, config, email_service, email_templates, recommendations, ticket_imports, tokens
 from .approvals import REQUESTS, active_request_for
 from .config import settings
 from .recommendations import OPEN_ITEM, QUEUE, QueueError
-from .serializers import TICKET_FIELDS, ticket_brief
+from .serializers import TICKET_FIELDS, approval_context, employee_email_for, sanitize_context, ticket_brief
 from .sla import approval_response, parse_iso, ticket_sla
 from .store import PersistentDict
 
@@ -69,6 +69,8 @@ def submit(item_ids, tickets_by_id, note=None, selection=None):
                     ticket=_public_ticket(ticket),
                     source="control_center",
                     batch_id=batch_id,
+                    employee_email=employee_email_for(ticket) or None,
+                    context=approval_context(ticket, ticket_imports.active_manager_fields()),
                 )
             item.update(status="submitted", request_id=request["request_id"], batch_id=batch_id, updated_at=clock.timestamp())
             request_ids.append(request["request_id"])
@@ -93,6 +95,62 @@ def submit(item_ids, tickets_by_id, note=None, selection=None):
         )
         _deliver(batch, request_ids, tickets_by_id, kind="initial")
     return batch
+
+
+def submit_tickets(ticket_ids, tickets_by_id, note=None):
+    """Batch tickets picked in All Tickets, eligible or not. Nothing is created unless every ticket is valid.
+
+    A ticket already in the approval queue reuses its queue entry; any other ticket gets a manual entry.
+    A ticket that already has an open request with the manager is refused (no duplicates).
+    """
+    with WORKFLOW_LOCK:
+        wanted = list(dict.fromkeys((t or "").strip() for t in ticket_ids or [] if (t or "").strip()))
+        if not wanted:
+            raise QueueError("select at least one ticket", 422)
+        if len(wanted) > config.settings.max_batch_size:
+            raise QueueError(f"a batch can hold at most {config.settings.max_batch_size} tickets", 422)
+
+        problems = []
+        for ticket_id in wanted:
+            if ticket_id not in tickets_by_id:
+                problems.append(f"{ticket_id} is not in the current ticket data")
+                continue
+            active = active_request_for(ticket_id)
+            queued = recommendations.queued_item_for(ticket_id)
+            # A resubmission queue entry belongs to the open request, so it may be sent again.
+            if active and not (queued and queued["request_id"] == active["request_id"]):
+                problems.append(f"{ticket_id} already has an open request with the manager ({active['request_id']})")
+        if problems:
+            raise QueueError("Batch not sent: " + "; ".join(problems) + ".")
+
+        item_ids = []
+        manual = []
+        with QUEUE.lock:
+            for ticket_id in wanted:
+                item = recommendations.queued_item_for(ticket_id)
+                if item is None:
+                    item = recommendations._manual_item(tickets_by_id[ticket_id], note="requested from All Tickets")
+                    manual.append(ticket_id)
+                item_ids.append(item["item_id"])
+            QUEUE.save()
+        if manual:
+            activity.record(
+                "queue_manual_add",
+                f"{len(manual)} ticket(s) requested manually from All Tickets: {', '.join(manual)}",
+                ticket_ids=manual,
+            )
+        return submit(item_ids, tickets_by_id, note, {"mode": "manual", "source": "all_tickets"})
+
+
+def delivery_for(request):
+    """The latest email attempt that carried this request's links, if any."""
+    batch = BATCHES.get(request.get("batch_id") or "")
+    if not batch:
+        return None
+    for email in reversed(batch.get("emails", [])):
+        if request["request_id"] in email.get("request_ids", []):
+            return {key: email.get(key) for key in ("kind", "status", "delivered", "error", "at")}
+    return None
 
 
 def resend(batch_id, tickets_by_id):
@@ -129,6 +187,7 @@ def _email_items(request_ids, tickets_by_id, now, issued):
             "sla": ticket_sla(ticket, now),
             "response_due": response["due_at"],
             "links": links,
+            "context": sanitize_context(request.get("context")) or {},
         })
     return items, expires_at
 
@@ -216,6 +275,8 @@ def send_reminders(tickets_by_id, now=None):
 def batch_view(batch):
     view = {key: batch.get(key) for key in ("batch_id", "created_at", "updated_at", "status", "item_ids", "request_ids", "note", "selection")}
     statuses = [REQUESTS[rid]["status"] for rid in batch["request_ids"] if rid in REQUESTS]
+    priorities = [((REQUESTS[rid].get("ticket") or {}).get("priority") or "unknown") for rid in batch["request_ids"] if rid in REQUESTS]
+    view["priorities"] = {p: priorities.count(p) for p in dict.fromkeys(priorities)}
     view["counts"] = {s: statuses.count(s) for s in ("pending", "info_requested", "approved", "rejected")}
     view["total"] = len(statuses)
     view["emails"] = [

@@ -16,8 +16,10 @@ from .retrieval import retrieve_articles
 from .ai_service import generate_triage
 from .approvals import REQUESTS, apply_action, create_request
 from .config import PROJECT_DIR, settings
-from . import activity, automation, email_service, recommendations
+from . import activity, automation, email_service, notifications, recommendations, ticket_imports
 from .admin_api import create_router
+from .instance_lock import InstanceLock
+from .serializers import mask_email
 from .manager_actions import router as manager_router
 
 FMT = "%Y-%m-%d %H:%M"
@@ -29,13 +31,19 @@ log = logging.getLogger("ticket_api")
 
 @asynccontextmanager
 async def lifespan(app):
-    recommendations.analyse_tickets(TICKETS)
-    task = None
-    if settings.scheduler_enabled:
-        task = asyncio.create_task(automation.scheduler_loop(lambda: TICKETS))
-    yield
-    if task:
-        task.cancel()
+    # Refuse to start before writing anything if another server already uses this data folder.
+    lock = InstanceLock(settings.store_dir).acquire()
+    try:
+        recommendations.analyse_tickets(TICKETS)
+        task = None
+        if settings.scheduler_enabled:
+            task = asyncio.create_task(automation.scheduler_loop(lambda: TICKETS))
+        yield
+        if task:
+            task.cancel()
+        notifications.wait(timeout=10)
+    finally:
+        lock.release()
 
 
 app = FastAPI(title="ticket-api", lifespan=lifespan)
@@ -57,29 +65,75 @@ def load_tickets(path):
             "Set TICKETS_DATA_PATH to the CSV file, for example data/tickets_sample.csv."
         )
 
+    return _load_with_report(path)[0]
+
+
+def _load_with_report(path):
+    """Load a ticket CSV through the same validation as an upload. Invalid rows are skipped and reported."""
+    if not Path(path).is_file():
+        raise RuntimeError(f"Ticket data file not found: {path}.")
+    try:
+        rows, report = ticket_imports.load_ticket_file(path)
+    except ticket_imports.ImportFailed as error:
+        raise RuntimeError(f"Ticket data file {path} cannot be loaded: {error}")
     tickets = []
-    with open(path, newline="", encoding="utf-8") as f:
-        for row in csv.DictReader(f):
-            row.setdefault("resolved_at", "")
-            row["created"] = datetime.strptime(row["created_at"], FMT)
-            row["resolved"] = (
-                datetime.strptime(row["resolved_at"], FMT)
-                if row["resolved_at"]
-                else None
-            )
-            tickets.append(row)
-    return tickets
+    for row in rows:
+        row["created"] = datetime.strptime(row["created_at"], FMT)
+        row["resolved"] = datetime.strptime(row["resolved_at"], FMT) if row["resolved_at"] else None
+        tickets.append(row)
+    return tickets, report
 
 
-TICKETS = load_tickets(DATA_PATH)
+# What the active ticket file contained, including rows that could not be loaded.
+LOAD_REPORT = {}
+
+
+def _activate(tickets, report):
+    TICKETS[:] = tickets
+    LOAD_REPORT.clear()
+    LOAD_REPORT.update(report)
+    if report["skipped"]:
+        reasons = "; ".join(f"line {r['line']}: {r['message']}" for r in report["reasons"][:10])
+        log.warning("Skipped %s invalid row(s) in %s: %s", report["skipped"], report["file"], reasons)
+        activity.record(
+            "tickets_load_skipped",
+            f"Loaded {report['loaded']} of {report['total_rows']} tickets from {Path(report['file']).name}; "
+            f"{report['skipped']} invalid row(s) skipped: {reasons}",
+            skipped=report["skipped"], file=report["file"],
+        )
+    return len(tickets)
+
+
+def current_data_path():
+    """The latest successful CSV upload, or TICKETS_DATA_PATH when nothing was uploaded."""
+    return ticket_imports.active_file() or DATA_PATH
+
+
+def _initial_tickets():
+    path = current_data_path()
+    if path == DATA_PATH:
+        return _load_with_report(DATA_PATH)
+    try:
+        return _load_with_report(path)
+    except Exception as error:
+        log.error("Could not load the last imported file %s (%s); using %s", path, error, DATA_PATH)
+        return _load_with_report(DATA_PATH)
+
+
+TICKETS = []
+_activate(*_initial_tickets())
+
+
+def use_ticket_file(path):
+    """Load a ticket CSV and switch to it. On any error the current tickets stay in place."""
+    return _activate(*_load_with_report(path))
 
 
 def reload_tickets():
-    """Re-read the ticket CSV. On any error the current tickets stay in place."""
-    new_tickets = load_tickets(DATA_PATH)
-    TICKETS[:] = new_tickets
-    activity.record("tickets_imported", f"Imported {len(new_tickets)} tickets from the CSV file", count=len(new_tickets))
-    return len(new_tickets)
+    """Re-read the current ticket CSV. On any error the current tickets stay in place."""
+    count = use_ticket_file(current_data_path())
+    activity.record("tickets_imported", f"Reloaded {count} tickets from the CSV file", count=count)
+    return count
 
 
 class TriageRequest(BaseModel):
@@ -110,6 +164,11 @@ def public(ticket):
             "status",
         )
     }
+
+
+def _legacy(request):
+    """Original response shape, with the employee's address masked (it is only for notifications)."""
+    return {**request, "employee_email": mask_email(request.get("employee_email") or "")}
 
 
 def find_ticket(ticket_id):
@@ -143,7 +202,7 @@ def get_ticket(ticket_id: str):
 @app.get("/summary")
 def summary():
     try:
-        by_category = summarize_tickets(DATA_PATH)
+        by_category = summarize_tickets(current_data_path())
     except ValueError as error:
         raise HTTPException(
             status_code=503,
@@ -190,31 +249,31 @@ def create_approval_request(body: ApprovalRequestCreate):
     if ticket is None:
         raise HTTPException(status_code=404, detail="ticket not found")
 
-    return create_request(
+    return _legacy(create_request(
         body.ticket_id,
         ticket["priority"],
         body.refund_amount,
         body.team_account_closing,
         ticket=public(ticket),
-    )
+    ))
 
 
 @app.get("/approval-requests")
 def list_approval_requests():
-    return list(REQUESTS.values())
+    return [_legacy(r) for r in REQUESTS.values()]
 
 
 @app.get("/approval-requests/{request_id}")
 def get_approval_request(request_id: str):
     if request_id not in REQUESTS:
         raise HTTPException(status_code=404, detail="request not found")
-    return REQUESTS[request_id]
+    return _legacy(REQUESTS[request_id])
 
 
 @app.post("/approval-requests/{request_id}/actions")
 def act_on_approval_request(request_id: str, body: ApprovalAction):
     try:
-        return apply_action(request_id, body.action, body.note)
+        return _legacy(apply_action(request_id, body.action, body.note))
     except LookupError:
         raise HTTPException(status_code=404, detail="request not found")
     except ValueError as error:
@@ -248,6 +307,6 @@ def _store_writable():
 
 # New routes must be registered before the static mount, which catches every other path.
 app.include_router(manager_router)
-app.include_router(create_router(lambda: TICKETS, reload_tickets))
+app.include_router(create_router(lambda: TICKETS, reload_tickets, use_ticket_file, current_data_path, lambda: LOAD_REPORT))
 
 app.mount("/", StaticFiles(directory=WEB_DIR, html=True), name="web")

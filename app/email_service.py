@@ -7,7 +7,9 @@
 Only the smtp backend can report "sent". The others report what they actually did.
 """
 
+import hashlib
 import logging
+import re
 import smtplib
 import socket
 import ssl
@@ -18,11 +20,20 @@ from pathlib import Path
 
 from . import clock, config
 from .serializers import mask_email
+from .store import PersistentDict
 
 log = logging.getLogger("ticket_api.email")
 
 LOCAL_FROM = "ticket-api@localhost"
 UNSET_RECIPIENT = "manager-email-not-configured@localhost"
+EMAIL_PATTERN = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
+GMAIL_APP_PASSWORD_HELP = (
+    "Gmail needs a 16-character App Password (Google Account > Security > 2-Step Verification > "
+    "App passwords), not your normal Gmail password."
+)
+
+# Outcome of real SMTP sends, so the dashboard can say whether delivery has been verified.
+DELIVERY_LOG = PersistentDict(config.settings.store_dir / "email_delivery.json")
 
 
 class EmailConfigError(Exception):
@@ -33,15 +44,57 @@ def missing_settings(settings=None):
     settings = settings or config.settings
     missing = []
     if settings.email_backend == "smtp":
+        gmail = config.is_gmail_host(settings.smtp_host)
         if not settings.smtp_host:
             missing.append("SMTP_HOST")
+        if gmail and not settings.smtp_username:
+            missing.append("SMTP_USERNAME")
+        if (settings.smtp_username or gmail) and not settings.smtp_password:
+            missing.append("SMTP_PASSWORD")
         if not settings.email_from:
-            missing.append("EMAIL_FROM")
+            missing.append("FROM_EMAIL")
         if not settings.manager_email:
             missing.append("MANAGER_EMAIL")
-        if settings.smtp_username and not settings.smtp_password:
-            missing.append("SMTP_PASSWORD")
+        elif not EMAIL_PATTERN.match(settings.manager_email):
+            missing.append("MANAGER_EMAIL (not a valid email address)")
     return missing
+
+
+def _fingerprint(settings):
+    """Identifies the delivery setup, so a success with old settings is not reported as verified."""
+    raw = "|".join(str(v) for v in (settings.smtp_host, settings.smtp_port, settings.smtp_security, settings.smtp_username, settings.manager_email))
+    return hashlib.sha256(raw.encode()).hexdigest()[:16]
+
+
+def _record_delivery(result, settings):
+    entry = {
+        "status": result["status"],
+        "error": result["error"],
+        "at": result["at"],
+        "recipient": result["recipient"],
+        "fingerprint": _fingerprint(settings),
+    }
+    with DELIVERY_LOG.lock:
+        DELIVERY_LOG.put("last_attempt", entry)
+        if result["status"] == "sent":
+            DELIVERY_LOG.put("last_success", entry)
+        DELIVERY_LOG.save()
+
+
+def delivery_record(settings=None):
+    settings = settings or config.settings
+    fingerprint = _fingerprint(settings)
+    last = DELIVERY_LOG.get("last_attempt")
+    success = DELIVERY_LOG.get("last_success")
+    current = lambda e: e if e and e.get("fingerprint") == fingerprint else None
+    last, success = current(last), current(success)
+    return {
+        "verified": settings.email_backend == "smtp" and success is not None,
+        "last_success_at": success["at"] if success else None,
+        "last_attempt_at": last["at"] if last else None,
+        "last_attempt_status": last["status"] if last else None,
+        "last_error": last["error"] if last and last["status"] != "sent" else None,
+    }
 
 
 def status():
@@ -56,6 +109,12 @@ def status():
         )
     if not settings.manager_email:
         warnings.append("MANAGER_EMAIL is not set.")
+    gmail = settings.email_backend == "smtp" and config.is_gmail_host(settings.smtp_host)
+    if gmail and settings.email_from and settings.smtp_username and settings.email_from.lower() != settings.smtp_username.lower():
+        warnings.append("Gmail sends as SMTP_USERNAME; a different FROM_EMAIL is replaced unless it is a verified alias.")
+    delivery = delivery_record(settings)
+    if settings.email_backend == "smtp" and not missing and not delivery["verified"]:
+        warnings.append("SMTP is configured but delivery has not been verified yet. Send a test email.")
     if settings.public_base_url.startswith(("http://localhost", "http://127.0.0.1")):
         warnings.append(
             "PUBLIC_BASE_URL points to this computer, so action links only open on this computer."
@@ -64,10 +123,13 @@ def status():
         "backend": settings.email_backend,
         "delivers_real_email": settings.email_backend == "smtp",
         "ready": not missing,
+        "smtp_configured": settings.email_backend == "smtp" and not missing,
+        "gmail": gmail,
+        "delivery": delivery,
         "missing_settings": missing,
         "warnings": warnings,
         "manager_email": mask_email(settings.manager_email),
-        "manager_email_configured": bool(settings.manager_email),
+        "manager_email_configured": bool(settings.manager_email) and bool(EMAIL_PATTERN.match(settings.manager_email)),
         "email_from": settings.email_from,
         "smtp_host": settings.smtp_host if settings.email_backend == "smtp" else "",
         "smtp_port": settings.smtp_port if settings.email_backend == "smtp" else None,
@@ -78,13 +140,17 @@ def status():
     }
 
 
-def build_message(subject, text, html, to=None):
+def build_message(subject, text, html, employee=None):
+    """Manager emails go to MANAGER_EMAIL; decision notices go to the ticket's employee. Never to customers."""
     settings = config.settings
     message = EmailMessage()
     message["Subject"] = subject
     message["From"] = settings.email_from or LOCAL_FROM
-    recipient = to or settings.manager_email or UNSET_RECIPIENT
-    message["To"] = formataddr((settings.manager_name, recipient)) if settings.manager_name and not to else recipient
+    if employee:
+        message["To"] = employee
+    else:
+        recipient = settings.manager_email or UNSET_RECIPIENT
+        message["To"] = formataddr((settings.manager_name, recipient)) if settings.manager_name else recipient
     message["Message-ID"] = make_msgid(domain="ticket-api.local")
     message["Date"] = clock.now().strftime("%a, %d %b %Y %H:%M:%S %z")
     message.set_content(text)
@@ -92,16 +158,24 @@ def build_message(subject, text, html, to=None):
     return message
 
 
-def send(subject, text, html, to=None):
-    """Send a message with the configured backend. Never raises; returns a delivery result."""
+def send(subject, text, html):
+    """Send a message to the manager with the configured backend. Never raises; returns a delivery result."""
+    return _deliver(build_message(subject, text, html), config.settings.manager_email, manager=True)
+
+
+def send_to_employee(address, subject, text, html):
+    """Decision notice to the employee who raised a ticket. The caller checks the address policy first."""
+    return _deliver(build_message(subject, text, html, employee=address), address, manager=False)
+
+
+def _deliver(message, recipient, manager):
     settings = config.settings
-    message = build_message(subject, text, html, to)
     result = {
         "backend": settings.email_backend,
         "status": "failed",
         "delivered": False,
         "message_id": message["Message-ID"],
-        "recipient": mask_email(to or settings.manager_email),
+        "recipient": mask_email(recipient),
         "attempts": 0,
         "error": None,
         "outbox_file": None,
@@ -111,6 +185,8 @@ def send(subject, text, html, to=None):
     missing = missing_settings(settings)
     if missing:
         result["error"] = f"Email is not configured. Missing: {', '.join(missing)}."
+        if settings.email_backend == "smtp" and manager:
+            _record_delivery(result, settings)
         return result
 
     try:
@@ -127,9 +203,11 @@ def send(subject, text, html, to=None):
     except Exception as error:  # report every failure instead of crashing the request
         log.warning("Email delivery failed: %s", error)
         result["status"] = "failed"
-        result["error"] = _describe(error)
+        result["error"] = _describe(error, settings)
 
     result["at"] = clock.timestamp()
+    if settings.email_backend == "smtp" and manager:
+        _record_delivery(result, settings)
     return result
 
 
@@ -185,8 +263,10 @@ def _send_smtp(message, settings, result):
             time.sleep(min(2 ** attempt, 10))
 
 
-def _describe(error):
+def _describe(error, settings=None):
     if isinstance(error, smtplib.SMTPAuthenticationError):
+        if settings is not None and config.is_gmail_host(settings.smtp_host):
+            return f"Gmail rejected the login ({error.smtp_code}). {GMAIL_APP_PASSWORD_HELP}"
         return "SMTP login failed. Check SMTP_USERNAME and SMTP_PASSWORD."
     if isinstance(error, smtplib.SMTPRecipientsRefused):
         return "The SMTP server refused the recipient address."

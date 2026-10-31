@@ -9,14 +9,17 @@ os.environ.setdefault("TICKETS_DATA_PATH", "data/tickets_sample.csv")
 _store_dir = tempfile.mkdtemp(prefix="ticket-api-test-store-")
 os.environ["APP_STORE_DIR"] = _store_dir
 os.environ["APP_ENV"] = "local"
-os.environ.pop("ADMIN_API_KEY", None)
 atexit.register(shutil.rmtree, _store_dir, ignore_errors=True)
 os.environ["SCHEDULER_ENABLED"] = "false"
 os.environ["EMAIL_BACKEND"] = "file"
 os.environ["EMAIL_OUTBOX_DIR"] = os.path.join(_store_dir, "outbox")
 os.environ["PUBLIC_BASE_URL"] = "http://testserver"
-for _name in ("MANAGER_EMAIL", "MANAGER_NAME", "EMAIL_FROM", "SMTP_HOST", "SMTP_USERNAME", "SMTP_PASSWORD"):
-    os.environ.pop(_name, None)
+# Blank, not removed: python-dotenv only skips variables that already exist, so removing
+# them would let a developer's .env (manager email, SMTP App Password) leak into tests.
+for _name in ("ADMIN_API_KEY", "MANAGER_EMAIL", "MANAGER_NAME", "EMAIL_FROM", "FROM_EMAIL", "SMTP_HOST", "SMTP_USERNAME", "SMTP_PASSWORD"):
+    os.environ[_name] = ""
+os.environ["SMTP_PORT"] = "587"
+os.environ["SMTP_SECURITY"] = "starttls"
 
 
 import email
@@ -97,10 +100,10 @@ class Workflow:
 def workflow(tmp_path, monkeypatch):
     from fastapi.testclient import TestClient
 
-    from app import activity, approvals, batches, clock, config, main, recommendations, tokens
+    from app import activity, approvals, batches, clock, config, email_service, main, recommendations, ticket_imports, tokens
     from dataclasses import replace
 
-    for store in (approvals.REQUESTS, recommendations.QUEUE, batches.BATCHES, tokens.TOKENS, activity.EVENTS):
+    for store in (approvals.REQUESTS, recommendations.QUEUE, batches.BATCHES, tokens.TOKENS, activity.EVENTS, ticket_imports.IMPORTS, email_service.DELIVERY_LOG):
         store.clear()
 
     outbox = tmp_path / "outbox"
@@ -117,5 +120,13 @@ def workflow(tmp_path, monkeypatch):
 
     yield Workflow(TestClient(main.app), state, outbox)
 
-    for store in (approvals.REQUESTS, recommendations.QUEUE, batches.BATCHES, tokens.TOKENS, activity.EVENTS):
+    for store in (approvals.REQUESTS, recommendations.QUEUE, batches.BATCHES, tokens.TOKENS, activity.EVENTS, ticket_imports.IMPORTS, email_service.DELIVERY_LOG):
         store.clear()
+
+
+@pytest.fixture(autouse=True)
+def employee_notifications_inline(monkeypatch):
+    """Send decision notices synchronously in tests, so nothing runs after a test ends."""
+    from app import notifications
+
+    monkeypatch.setattr(notifications, "RUN_IN_BACKGROUND", False)

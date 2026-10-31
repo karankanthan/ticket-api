@@ -11,7 +11,8 @@ PRIORITIES = ("urgent", "high", "normal", "low")
 
 
 def _env(name, default=""):
-    return os.environ.get(name, default).strip()
+    # A blank value (e.g. "SMTP_PORT=" left empty in .env) means "use the default".
+    return os.environ.get(name, "").strip() or str(default).strip()
 
 
 def _hours(name, default):
@@ -63,6 +64,10 @@ def _choice(name, default, choices):
     return value
 
 
+def is_gmail_host(host):
+    return (host or "").strip().lower() in ("smtp.gmail.com", "smtp.googlemail.com")
+
+
 def _fraction(name, default):
     raw = _env(name, str(default))
     try:
@@ -102,6 +107,8 @@ class Settings:
     smtp_security: str = "starttls"
     smtp_timeout_seconds: int = 20
     smtp_max_attempts: int = 3
+    employee_notifications: bool = True
+    employee_email_domains: tuple = ()
 
     @property
     def is_production(self):
@@ -124,6 +131,13 @@ def load_settings():
     store_dir = Path(_env("APP_STORE_DIR") or PROJECT_DIR / "data" / "store")
 
     other_response = _hours("APPROVAL_RESPONSE_HOURS_OTHER", 24)
+
+    smtp_host = _env("SMTP_HOST")
+    smtp_username = _env("SMTP_USERNAME")
+    smtp_password = os.environ.get("SMTP_PASSWORD", "")
+    if is_gmail_host(smtp_host):
+        # Google shows App Passwords as "abcd efgh ijkl mnop"; the spaces are not part of it.
+        smtp_password = smtp_password.replace(" ", "").strip()
 
     return Settings(
         app_env=app_env,
@@ -154,16 +168,22 @@ def load_settings():
         scheduler_interval_seconds=_int("SCHEDULER_INTERVAL_SECONDS", 300, minimum=10),
         email_backend=_choice("EMAIL_BACKEND", "file", ("console", "file", "smtp")),
         email_outbox_dir=Path(_env("EMAIL_OUTBOX_DIR") or PROJECT_DIR / "data" / "outbox"),
-        email_from=_env("EMAIL_FROM"),
+        # FROM_EMAIL is accepted as another name; Gmail sends as SMTP_USERNAME anyway.
+        email_from=_env("EMAIL_FROM") or _env("FROM_EMAIL") or (smtp_username if "@" in smtp_username else ""),
         manager_email=_env("MANAGER_EMAIL"),
         manager_name=_env("MANAGER_NAME"),
-        smtp_host=_env("SMTP_HOST"),
+        smtp_host=smtp_host,
         smtp_port=_int("SMTP_PORT", 587, minimum=1),
-        smtp_username=_env("SMTP_USERNAME"),
-        smtp_password=os.environ.get("SMTP_PASSWORD", ""),
+        smtp_username=smtp_username,
+        smtp_password=smtp_password,
         smtp_security=_choice("SMTP_SECURITY", "starttls", ("starttls", "ssl", "none")),
         smtp_timeout_seconds=_int("SMTP_TIMEOUT_SECONDS", 20, minimum=1),
         smtp_max_attempts=_int("SMTP_MAX_ATTEMPTS", 3, minimum=1),
+        employee_notifications=_bool("EMPLOYEE_NOTIFICATIONS", True),
+        # Optional allow-list, e.g. "company.com". Empty = any valid address in the employee column.
+        employee_email_domains=tuple(
+            d.strip().lower().lstrip("@") for d in _env("EMPLOYEE_EMAIL_DOMAINS").split(",") if d.strip()
+        ),
     )
 
 

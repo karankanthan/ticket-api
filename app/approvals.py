@@ -13,7 +13,7 @@ OPEN_STATUSES = {"pending", "info_requested"}
 REQUESTS = PersistentDict(settings.store_dir / "approvals.json")
 
 
-def create_request(ticket_id, priority, refund_amount=None, team_account_closing=False, ticket=None, source="api", batch_id=None):
+def create_request(ticket_id, priority, refund_amount=None, team_account_closing=False, ticket=None, source="api", batch_id=None, employee_email=None, context=None):
     reasons = escalation_reasons(priority, refund_amount, team_account_closing)
     now = clock.timestamp()
     with REQUESTS.lock:
@@ -36,6 +36,11 @@ def create_request(ticket_id, priority, refund_amount=None, team_account_closing
             "emailed_at": None,
             "reminders_sent": 0,
             "last_reminder_at": None,
+            # Who to tell about the decision; never shown unmasked by the APIs.
+            "employee_email": employee_email or None,
+            "employee_notifications": [],
+            # What the manager is shown about the ticket, captured when the request is created.
+            "context": context,
             "history": [
                 {"event": "created", "status": "pending", "via": source, "note": None, "at": now},
             ],

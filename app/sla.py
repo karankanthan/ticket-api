@@ -59,8 +59,14 @@ def ticket_sla(ticket, now=None):
     due = created + timedelta(hours=target)
     result["due_at"] = due.isoformat(timespec="minutes")
 
+    if created > now + timedelta(hours=12):
+        # Never show a negative age or an "on track" SLA for a ticket from the future.
+        result["reason"] = "created date is in the future"
+        return result
+
     if status in UNRESOLVED:
-        elapsed = (now - created).total_seconds() / 3600
+        # A few hours ahead is allowed (time zones); count it as just created, never negative.
+        elapsed = max(0.0, (now - created).total_seconds() / 3600)
         remaining = target - elapsed
         result["elapsed_hours"] = round(elapsed, 2)
         result["remaining_hours"] = round(remaining, 2)
@@ -78,6 +84,9 @@ def ticket_sla(ticket, now=None):
             result["reason"] = "resolved date not available"
             return result
         elapsed = (resolved - created).total_seconds() / 3600
+        if elapsed < 0:
+            result["reason"] = "resolved date is before the created date"
+            return result
         result["elapsed_hours"] = round(elapsed, 2)
         result["state"] = "met" if elapsed <= target else "missed"
         return result
