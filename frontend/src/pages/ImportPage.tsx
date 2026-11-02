@@ -98,7 +98,14 @@ export default function ImportPage() {
     if (!upload || !mapping) return
     setCommitting(true)
     try {
-      const entry = await api.importCommit({ filename: upload.filename, content: upload.content, mapping, date_format: dateFormat, skip_invalid: skipInvalid })
+      const entry = await api.importCommit({
+        filename: upload.filename,
+        content: upload.content,
+        mapping,
+        date_format: dateFormat,
+        skip_invalid: skipInvalid,
+        acknowledge_removals: true,
+      })
       setResult(entry)
       toast({ tone: 'success', title: `Imported ${entry.imported_rows} tickets`, description: entry.analysis ? `${entry.analysis.added} added to the approval queue.` : undefined })
       reset()
