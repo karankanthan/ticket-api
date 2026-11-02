@@ -69,7 +69,7 @@ export const api = {
 
   importPreview: (body: { filename: string; content: string; mapping?: ColumnMapping | null; date_format?: string }) =>
     request<ImportPreview>('/api/imports/preview', { method: 'POST', body }),
-  importCommit: (body: { filename: string; content: string; mapping: ColumnMapping; date_format: string; skip_invalid: boolean }) =>
+  importCommit: (body: { filename: string; content: string; mapping: ColumnMapping; date_format: string; skip_invalid: boolean; acknowledge_removals: boolean }) =>
     request<ImportEntry>('/api/imports', { method: 'POST', body }),
   importHistory: (signal?: AbortSignal) => request<ImportHistory>('/api/imports', { signal }),
 
