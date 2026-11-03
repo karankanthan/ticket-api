@@ -96,6 +96,7 @@ class Settings:
     scheduler_enabled: bool = True
     scheduler_interval_seconds: int = 300
     email_backend: str = "file"
+    resend_api_key: str = field(default="", repr=False)
     email_outbox_dir: Path = PROJECT_DIR / "data" / "outbox"
     email_from: str = ""
     manager_email: str = ""
@@ -166,7 +167,12 @@ def load_settings():
         action_link_ttl_hours=_hours("ACTION_LINK_TTL_HOURS", 72),
         scheduler_enabled=_bool("SCHEDULER_ENABLED", True),
         scheduler_interval_seconds=_int("SCHEDULER_INTERVAL_SECONDS", 300, minimum=10),
-        email_backend=_choice("EMAIL_BACKEND", "file", ("console", "file", "smtp")),
+        email_backend=_choice(
+    "EMAIL_BACKEND",
+    "file",
+    ("console", "file", "smtp", "resend"),
+),
+        resend_api_key=os.environ.get("RESEND_API_KEY", "").strip(),
         email_outbox_dir=Path(_env("EMAIL_OUTBOX_DIR") or PROJECT_DIR / "data" / "outbox"),
         # FROM_EMAIL is accepted as another name; Gmail sends as SMTP_USERNAME anyway.
         email_from=_env("EMAIL_FROM") or _env("FROM_EMAIL") or (smtp_username if "@" in smtp_username else ""),
